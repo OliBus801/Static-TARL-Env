@@ -1,0 +1,13 @@
+# === General parameters ===
+seeds:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+
+# === Model parameters ===
+alpha: 0.1        # Learning rate or step size
+beta: 0.9         # Momentum or weighting coefficient
+tol: 1e-6         # Convergence tolerance
+max_iter: 500     # Maximum number of iterations

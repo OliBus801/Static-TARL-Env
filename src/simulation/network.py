@@ -8,7 +8,7 @@ import torch
 from torch_geometric.data import Data
 import yaml
 
-from gnn_encoder import GNNEncoder, GNNEncoderConfig
+from .gnn_encoder import GNNEncoder, GNNEncoderConfig
 
 
 # Load configuration parameters --------------

@@ -1,5 +1,191 @@
-"""Backward compatibility module exposing the PyG-based TAP scenario."""
+"""PyTorch Geometric utilities for TAP scenarios."""
 
-from .pyg_network import TapScenario
+from __future__ import annotations
 
-__all__ = ["TapScenario"]
+import json
+from pathlib import Path
+from typing import Dict, List
+
+import numpy as np
+import torch
+from torch_geometric.data import Data
+import yaml
+
+
+# Load configuration parameters --------------
+def load_params(filepath: Path) -> dict:
+    with open(filepath, "r", encoding="utf-8") as file:
+        return yaml.safe_load(file)
+
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "configs" / "params.yaml"
+PARAMS = load_params(CONFIG_PATH)
+ALPHA = PARAMS.get("alpha", 0.15)
+BETA = PARAMS.get("beta", 4.0)
+
+
+class TapScenario:
+    """Utility class to manipulate TAP data stored in JSON files."""
+
+    def __init__(self) -> None:
+        self.graph: Data | None = None
+        self.od: np.ndarray | None = None
+        self.total_agents = 0
+        self._node_id_to_idx: Dict[int, int] = {}
+
+    def load_network_from_json(self, filepath: str | Path) -> Data:
+        """Read a JSON network definition and build a PyG graph."""
+
+        with open(filepath, "r", encoding="utf-8") as file:
+            network_data = json.load(file)
+
+        nodes: List[dict] = network_data.get("nodes", [])
+        edges: List[dict] = network_data.get("edges", [])
+
+        if not nodes:
+            raise ValueError("The network JSON must contain at least one node.")
+
+        if not edges:
+            raise ValueError("The network JSON must contain at least one edge.")
+
+        node_ids = []
+        node_coordinates = []
+        for node in nodes:
+            if "id" not in node:
+                raise ValueError("Each node entry must define an 'id'.")
+            node_ids.append(int(node["id"]))
+            node_coordinates.append(
+                [float(node.get("x", 0.0)), float(node.get("y", 0.0))]
+            )
+
+        self._node_id_to_idx = {node_id: idx for idx, node_id in enumerate(node_ids)}
+
+        edge_sources = []
+        edge_targets = []
+        capacities = []
+        freeflows = []
+        lengths = []
+        for edge in edges:
+            if "source" not in edge or "target" not in edge:
+                raise ValueError("Each edge entry must define 'source' and 'target'.")
+            try:
+                origin = self._node_id_to_idx[int(edge["source"])]
+                destination = self._node_id_to_idx[int(edge["target"])]
+            except KeyError as exc:
+                raise ValueError("Edge references unknown node ids.") from exc
+
+            capacity = float(edge.get("capacity", 0.0))
+            freeflow = float(edge.get("freeflow_travel_time", 0.0))
+
+            origin_coord = node_coordinates[origin]
+            destination_coord = node_coordinates[destination]
+            # Here we compute Euclidean distance as length. TODO: Decide if we prefer something else.
+            length = float(
+                np.linalg.norm(
+                    np.array(destination_coord) - np.array(origin_coord)
+                )
+            )
+
+            edge_sources.append(origin)
+            edge_targets.append(destination)
+            capacities.append(capacity)
+            freeflows.append(freeflow)
+            lengths.append(length)
+
+        edge_index = torch.tensor([edge_sources, edge_targets], dtype=torch.long)
+        # Creating node feature matrix (only coordinates as of now)    
+        x = torch.tensor(node_coordinates, dtype=torch.float32)
+        capacity_tensor = torch.tensor(capacities, dtype=torch.float32)
+        freeflow_tensor = torch.tensor(freeflows, dtype=torch.float32)
+        length_tensor = torch.tensor(lengths, dtype=torch.float32)
+        edge_attr = torch.stack(
+            [capacity_tensor, freeflow_tensor, length_tensor], dim=1
+        )
+
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        data.capacity = capacity_tensor
+        data.freeflow_travel_time = freeflow_tensor
+        data.length = length_tensor
+        data.node_ids = torch.tensor(node_ids, dtype=torch.long)
+        data.edge_ids = torch.arange(edge_index.size(1), dtype=torch.long)
+
+        self.graph = data
+
+        print(
+            "✅ Successfully loaded network into PyTorch Geometric format!",
+            f"🌐 Network Info: {data.num_nodes} nodes, {data.num_edges} edges.",
+        )
+
+        return data
+
+    def load_demand_from_json(self, filepath: str | Path) -> np.ndarray:
+        """Load OD matrix information from a JSON file."""
+
+        with open(filepath, "r", encoding="utf-8") as file:
+            demand_data = json.load(file)
+        self.od = np.array(demand_data["matrix"], dtype=float)
+        self.total_agents = int(np.sum(self.od))
+        print(
+            "✅ Successfully loaded demand from JSON file!",
+            f"👥 Demand Info: Total agents = {self.total_agents}.",
+        )
+        return self.od
+
+    def check_flow_consistency(self, assignment: np.ndarray) -> bool:
+        """Verify whether the assignment complies with flow conservation."""
+
+        # supply = outflow demand - inflow demand per node
+        supply = np.sum(self.od, axis=1) - np.sum(self.od, axis=0)
+
+        edge_index = self.graph.edge_index.cpu().numpy().astype(np.int64)
+        origins = edge_index[0]
+        destinations = edge_index[1]
+        n_nodes = int(self.graph.num_nodes)
+
+        # vectorised aggregation of flows per node
+        outflows = np.bincount(origins, weights=assignment, minlength=n_nodes)
+        inflows = np.bincount(destinations, weights=assignment, minlength=n_nodes)
+
+        flows = supply - outflows + inflows
+
+        if not np.allclose(flows, 0.0):
+            inconsistent_nodes = np.where(~np.isclose(flows, 0.0))[0]
+            print(
+                "❌ Flow consistency check failed for nodes:",
+                inconsistent_nodes,
+                "with flow values:",
+                flows[inconsistent_nodes],
+            )
+            return False
+        print("✅ Flow consistency check passed.")
+        return True
+
+    def calculate_system_cost(self, assignment: np.ndarray) -> float:
+        """Compute the total system travel time using the BPR cost function."""
+
+        # Check if assignment is of correct type
+        if not isinstance(assignment, np.ndarray) or assignment.dtype != float:
+            raise TypeError("Assignment must be a numpy ndarray of type float and size matching the number of edges in the graph.")
+
+        if self.graph is None:
+            raise ValueError("Network must be loaded before calculating costs.")
+
+        if assignment.size != self.graph.num_edges:
+            raise ValueError(
+                "Assignment size must match the number of edges in the graph."
+            )
+
+        if not self.check_flow_consistency(assignment):
+            raise ValueError("The provided assignment does not verify flow consistency.")
+
+        capacities = self.graph.capacity.cpu().numpy()
+        freeflows = self.graph.freeflow_travel_time.cpu().numpy()
+
+        ratio = np.zeros_like(assignment, dtype=float)
+        nonzero_mask = capacities > 0
+        ratio[nonzero_mask] = assignment[nonzero_mask] / capacities[nonzero_mask]
+
+        travel_times = freeflows * (1 + ALPHA * ratio**BETA)
+        total_cost = float(np.sum(travel_times * assignment))
+
+        print(f"Coût total du système : {total_cost}")
+        return float(total_cost)

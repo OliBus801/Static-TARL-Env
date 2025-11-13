@@ -33,7 +33,7 @@ def sample_files(tmp_path):
 
 
 def test_load_network_and_demand(sample_files):
-    from simulation.pyg_network import TapScenario
+    from simulation.network import TapScenario
 
     network_path, demand_path = sample_files
     scenario = TapScenario()
@@ -54,29 +54,29 @@ def test_load_network_and_demand(sample_files):
 
 
 def test_flow_consistency(sample_files):
-    from simulation.pyg_network import TapScenario
+    from simulation.network import TapScenario
 
     network_path, demand_path = sample_files
     scenario = TapScenario()
     scenario.load_network_from_json(network_path)
     scenario.load_demand_from_json(demand_path)
 
-    assert scenario.check_flow_consistency([10, 0]) is True
-    assert scenario.check_flow_consistency([5, 0]) is False
-    assert scenario.check_flow_consistency([10, 5]) is False
+    assert scenario.check_flow_consistency(np.array([10, 0], dtype=float)) is True
+    assert scenario.check_flow_consistency(np.array([5, 0], dtype=float)) is False
+    assert scenario.check_flow_consistency(np.array([10, 5], dtype=float)) is False
 
 
 def test_system_cost_requires_consistent_flow(sample_files):
-    from simulation.pyg_network import TapScenario
+    from simulation.network import TapScenario
 
     network_path, demand_path = sample_files
     scenario = TapScenario()
     scenario.load_network_from_json(network_path)
     scenario.load_demand_from_json(demand_path)
 
-    scenario.check_flow_consistency([10, 0])
-    total_cost = scenario.calculate_system_cost([10, 0])
-    assert total_cost > 0
+    scenario.check_flow_consistency(np.array([10, 0], dtype=float))
+    total_cost = scenario.calculate_system_cost(np.array([10, 0], dtype=float))
+    assert total_cost == 690.0 # f(10) = 60*(1 + 0.15*(10/10)^4) = 69 per unit flow, total 690
 
     with pytest.raises(ValueError):
-        scenario.calculate_system_cost([0, 0])
+        scenario.calculate_system_cost(np.array([0, 0], dtype=float))

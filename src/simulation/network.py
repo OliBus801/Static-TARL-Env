@@ -11,6 +11,8 @@ import torch
 from torch_geometric.data import Data
 import yaml
 
+from .gnn_encoder import GNNEncoder, GNNEncoderConfig
+
 
 # Load configuration parameters --------------
 def load_params(filepath: Path) -> dict:
@@ -31,6 +33,8 @@ class TapScenario:
         self.od: np.ndarray | None = None
         self.total_agents = 0
         self._node_id_to_idx: Dict[int, int] = {}
+        self.encoder: GNNEncoder | None = None
+        self.embeddings: Dict[str, torch.Tensor] = {}
 
     def load_network_from_json(self, filepath: str | Path) -> Data:
         """Read a JSON network definition and build a PyG graph."""
@@ -116,6 +120,35 @@ class TapScenario:
         )
 
         return data
+
+    def build_gnn_encoder(self, **kwargs) -> GNNEncoder:
+        """Create a default GNN encoder based on the loaded graph."""
+
+        if self.graph is None:
+            raise ValueError("Load a graph before building an encoder.")
+
+        config = GNNEncoderConfig(
+            node_in_channels=int(self.graph.x.size(1)),
+            edge_in_channels=int(self.graph.edge_attr.size(1)),
+            **kwargs,
+        )
+        self.encoder = GNNEncoder(config)
+        return self.encoder
+
+    def compute_embeddings(self, encoder: GNNEncoder | None = None) -> Dict[str, torch.Tensor]:
+        """Generate and expose embeddings for reuse in the scenario."""
+
+        if self.graph is None:
+            raise ValueError("Graph must be loaded before computing embeddings.")
+
+        if encoder is not None:
+            self.encoder = encoder
+        elif self.encoder is None:
+            self.build_gnn_encoder()
+
+        assert self.encoder is not None
+        self.embeddings = self.encoder(self.graph)
+        return self.embeddings
 
     def load_demand_from_json(self, filepath: str | Path) -> np.ndarray:
         """Load OD matrix information from a JSON file."""

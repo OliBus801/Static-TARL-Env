@@ -1,65 +1,82 @@
 import json
-import networkx as nx
+
 import numpy as np
 import pytest
+from torch_geometric.data import Data
 
 
-def test_network(tmp_path):
-    from simulation.network import TapScenario
-    
-    # Prepare temporary test JSONs
+@pytest.fixture
+def sample_files(tmp_path):
     network = {
         "nodes": [
             {"id": 0, "x": 0, "y": 0},
-            {"id": 1, "x": 2, "y": 0}
+            {"id": 1, "x": 2, "y": 0},
         ],
         "edges": [
             {"source": 0, "target": 1, "capacity": 10, "freeflow_travel_time": 60},
-            {"source": 0, "target": 1, "capacity": 5,  "freeflow_travel_time": 30}
-        ]
-        }
+            {"source": 0, "target": 1, "capacity": 5, "freeflow_travel_time": 30},
+        ],
+    }
     demand = {
-        "zones": ["Z1","Z2"],
+        "zones": ["Z1", "Z2"],
         "period": {"start": "07:00", "end": "08:00"},
         "matrix": [
-            [0,   10],
-            [0,  0]
-        ]
+            [0, 10],
+            [0, 0],
+        ],
     }
     network_path = tmp_path / "network.json"
     demand_path = tmp_path / "demand.json"
     network_path.write_text(json.dumps(network))
     demand_path.write_text(json.dumps(demand))
+    return network_path, demand_path
 
-    # Create the TapScenario object
-    G = TapScenario()
-    G.load_network_from_json(network_path)
-    G.load_demand_from_json(demand_path)
 
-    # Basic network checks ------------------------
-    assert isinstance(G.graph, nx.MultiDiGraph), "the graph should be an instance of MultiDiGraph."
-    assert G.graph.is_directed(), "The graph should be directed."
+def test_load_network_and_demand(sample_files):
+    from simulation.pyg_network import TapScenario
 
-    # Check nodes
-    assert set(G.graph.nodes) == {0, 1}, "Nodes 0 and 1 should be present."
+    network_path, demand_path = sample_files
+    scenario = TapScenario()
+    graph = scenario.load_network_from_json(network_path)
+    scenario.load_demand_from_json(demand_path)
 
-    # Check edges
-    assert G.graph.number_of_edges(0, 1) == 2, "There should be two parallel edges from 0 to 1."
+    assert isinstance(graph, Data)
+    assert graph.num_nodes == 2
+    assert graph.num_edges == 2
+    assert pytest.approx(graph.capacity.tolist()) == [10.0, 5.0]
+    assert pytest.approx(graph.freeflow_travel_time.tolist()) == [60.0, 30.0]
+    assert pytest.approx(graph.length.tolist()) == [2.0, 2.0]
+    assert graph.edge_attr.shape == (2, 3)
 
-    # Check edge attributes exist for all edges
-    for u, v, attrs in G.graph.edges(data=True):
-        assert "capacity" in attrs, f"Edge ({u},{v}) missing 'capacity'."
-        assert "freeflow_travel_time" in attrs, f"Edge ({u},{v}) missing 'freeflow_travel_time'."
+    assert isinstance(scenario.od, np.ndarray)
+    assert np.array_equal(scenario.od, np.array([[0, 10], [0, 0]]))
+    assert scenario.total_agents == 10
 
-    # Basic demand checks ------------------------
-    assert isinstance(G.od, np.ndarray), "OD should be a numpy array."
-    assert np.array_equal(G.od, np.array([[0, 10], [0, 0]])), "Demand matrix does not match expected."
-    assert G.total_agents == 10, "Incorrect total number of agents. Expected 10."
 
-    # Basic flow consistency check ------------------------
-    good_assignment = [10, 0]  # All flow on first edge
-    bad_assignment_1 = [5, 0]    # Not enough flow to satisfy demand
-    bad_assignment_2 = [10, 5]   # Too much flow
-    assert G.check_flow_consistency(good_assignment) is True, "Good assignment should pass flow consistency."
-    assert G.check_flow_consistency(bad_assignment_1) is False, "Bad assignment 1 should fail flow consistency. Not enough flow."
-    assert G.check_flow_consistency(bad_assignment_2) is False, "Bad assignment 2 should fail flow consistency. Too much flow."
+def test_flow_consistency(sample_files):
+    from simulation.pyg_network import TapScenario
+
+    network_path, demand_path = sample_files
+    scenario = TapScenario()
+    scenario.load_network_from_json(network_path)
+    scenario.load_demand_from_json(demand_path)
+
+    assert scenario.check_flow_consistency([10, 0]) is True
+    assert scenario.check_flow_consistency([5, 0]) is False
+    assert scenario.check_flow_consistency([10, 5]) is False
+
+
+def test_system_cost_requires_consistent_flow(sample_files):
+    from simulation.pyg_network import TapScenario
+
+    network_path, demand_path = sample_files
+    scenario = TapScenario()
+    scenario.load_network_from_json(network_path)
+    scenario.load_demand_from_json(demand_path)
+
+    scenario.check_flow_consistency([10, 0])
+    total_cost = scenario.calculate_system_cost([10, 0])
+    assert total_cost > 0
+
+    with pytest.raises(ValueError):
+        scenario.calculate_system_cost([0, 0])

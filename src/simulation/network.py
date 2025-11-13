@@ -1,7 +1,4 @@
 """PyTorch Geometric utilities for TAP scenarios."""
-
-from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Dict, List
@@ -11,7 +8,7 @@ import torch
 from torch_geometric.data import Data
 import yaml
 
-from .gnn_encoder import GNNEncoder, GNNEncoderConfig
+from gnn_encoder import GNNEncoder, GNNEncoderConfig
 
 
 # Load configuration parameters --------------

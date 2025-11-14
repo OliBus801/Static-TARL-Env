@@ -16,7 +16,7 @@ class EnvConfig:
     """Utility container with the tensors required to build the environment."""
 
     embeddings: Tensor
-    od_features: Tensor
+    od_matrix: Tensor
     od_demands: Tensor
     path_od_mapping: torch.LongTensor
     path_edge_incidence: Tensor
@@ -37,7 +37,7 @@ class StaticTapEnv(gym.Env):
         self.device = device or torch.device("cpu")
 
         self.embeddings = config.embeddings.to(self.device, dtype=torch.float32)
-        self.od_features = config.od_features.to(self.device, dtype=torch.float32)
+        self.od_matrix = config.od_matrix.to(self.device, dtype=torch.float32)
         self.od_demands = config.od_demands.to(self.device, dtype=torch.float32)
         self.path_od_mapping = config.path_od_mapping.to(self.device)
         self.path_edge_incidence = config.path_edge_incidence.to(
@@ -64,7 +64,7 @@ class StaticTapEnv(gym.Env):
         if self.path_od_mapping.numel() != self.num_paths:
             raise ValueError("path_od_mapping must have the same length as the number of paths.")
 
-        obs_dim = int(self.embeddings.numel() + self.od_features.numel())
+        obs_dim = int(self.embeddings.numel() + self.od_matrix.numel())
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -75,7 +75,7 @@ class StaticTapEnv(gym.Env):
 
     def _build_observation(self) -> np.ndarray:
         obs = torch.cat(
-            [self.embeddings.flatten(), self.od_features.flatten()], dim=0
+            [self.embeddings.flatten(), self.od_matrix.flatten()], dim=0
         ).to(torch.float32)
         return obs.detach().cpu().numpy()
 

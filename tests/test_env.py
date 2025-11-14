@@ -16,7 +16,6 @@ from simulation.env import (
 def build_simple_config() -> EnvConfig:
     embeddings = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
     od_matrix = torch.tensor([[0.0, 10.0], [0.0, 0.0]], dtype=torch.float32)
-    od_features = od_matrix
     demands = torch.tensor([10.0], dtype=torch.float32)
     path_od_mapping = torch.tensor([0, 0], dtype=torch.long)
     path_edge_incidence = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
@@ -24,7 +23,7 @@ def build_simple_config() -> EnvConfig:
     capacities = torch.tensor([10.0, 5.0], dtype=torch.float32)
     return EnvConfig(
         embeddings=embeddings,
-        od_features=od_features,
+        od_matrix=od_matrix,
         od_demands=demands,
         path_od_mapping=path_od_mapping,
         path_edge_incidence=path_edge_incidence,

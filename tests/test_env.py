@@ -1,10 +1,12 @@
 """Unit tests for the StaticTapEnv."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
-import torch
 
+from simulation import build_env_from_json
 from simulation.env import (
     EnvConfig,
     RewardClippingWrapper,
@@ -14,13 +16,13 @@ from simulation.env import (
 
 
 def build_simple_config() -> EnvConfig:
-    embeddings = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
-    od_matrix = torch.tensor([[0.0, 10.0], [0.0, 0.0]], dtype=torch.float32)
-    demands = torch.tensor([10.0], dtype=torch.float32)
-    path_od_mapping = torch.tensor([0, 0], dtype=torch.long)
-    path_edge_incidence = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
-    freeflow = torch.tensor([1.0, 2.0], dtype=torch.float32)
-    capacities = torch.tensor([10.0, 5.0], dtype=torch.float32)
+    embeddings = np.array([[1.0, 2.0]], dtype=np.float32)
+    od_matrix = np.array([[0.0, 10.0], [0.0, 0.0]], dtype=np.float32)
+    demands = np.array([10.0], dtype=np.float32)
+    path_od_mapping = np.array([0, 0], dtype=np.int64)
+    path_edge_incidence = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    freeflow = np.array([1.0, 2.0], dtype=np.float32)
+    capacities = np.array([10.0, 5.0], dtype=np.float32)
     return EnvConfig(
         embeddings=embeddings,
         od_matrix=od_matrix,
@@ -70,3 +72,56 @@ def test_reward_wrappers_clip_and_normalize(env):
     _, reward, _, _, _ = wrapped_env.step(action)
 
     assert -1.0 <= reward <= 1.0
+
+
+def test_build_env_from_json_produces_functional_env():
+    base_dir = Path(__file__).resolve().parent.parent
+    scenario_dir = base_dir / "src" / "data" / "scenarios" / "test"
+    network_path = scenario_dir / "test_network.json"
+    demand_path = scenario_dir / "test_demand.json"
+
+    scenario, path_set, env = build_env_from_json(network_path, demand_path, k_paths=2)
+
+    obs, info = env.reset()
+    assert obs.shape == env.observation_space.shape
+    assert "od_demands" in info
+
+    action = np.zeros(env.action_space.shape, dtype=np.float32)
+    _, reward, terminated, truncated, step_info = env.step(action)
+
+    assert terminated is True
+    assert truncated is False
+    assert isinstance(reward, float)
+    assert "path_flows" in step_info
+
+    flattened_embeddings = np.concatenate(
+        [
+            tensor.detach().cpu().numpy().reshape(-1)
+            for _, tensor in sorted(scenario.embeddings.items())
+        ]
+    )
+    np.testing.assert_allclose(
+        env.embeddings.detach().cpu().numpy(), flattened_embeddings
+    )
+    np.testing.assert_allclose(
+        env.od_matrix.detach().cpu().numpy(), scenario.od,
+    )
+    np.testing.assert_allclose(
+        env.od_demands.detach().cpu().numpy(), path_set.od_demands.cpu().numpy()
+    )
+    np.testing.assert_allclose(
+        env.path_od_mapping.detach().cpu().numpy(),
+        path_set.path_od_mapping.cpu().numpy(),
+    )
+    np.testing.assert_allclose(
+        env.path_edge_incidence.detach().cpu().numpy(),
+        path_set.path_edge_incidence.cpu().numpy(),
+    )
+    np.testing.assert_allclose(
+        env.freeflow_times.detach().cpu().numpy(),
+        scenario.graph.freeflow_travel_time.detach().cpu().numpy(),
+    )
+    np.testing.assert_allclose(
+        env.capacities.detach().cpu().numpy(),
+        scenario.graph.capacity.detach().cpu().numpy(),
+    )

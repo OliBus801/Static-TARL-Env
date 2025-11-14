@@ -60,7 +60,7 @@ def build_env_from_json(
     config = EnvConfig(
         embeddings=embeddings,
         od_matrix=od_matrix_tensor,
-        od_demands=torch.as_tensor(path_set.od_demands, dtype=torch.float32),
+        od_demands=torch.as_tensor(path_set.od_demands, dtype=torch.int32),
         path_od_mapping=torch.as_tensor(path_set.path_od_mapping, dtype=torch.long),
         path_edge_incidence=torch.as_tensor(path_set.path_edge_incidence, dtype=torch.float32),
         freeflow_times=torch.as_tensor(freeflow_times, dtype=torch.float32).flatten(),

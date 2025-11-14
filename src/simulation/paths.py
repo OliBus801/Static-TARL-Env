@@ -181,7 +181,7 @@ def _extract_od_pairs(od_matrix: Tensor | np.ndarray) -> Tuple[List[Tuple[int, i
     if od_tensor.ndim != 2 or od_tensor.size(0) != od_tensor.size(1):
         raise ValueError("od_matrix must be a square matrix with origin/destination demands.")
     od_pairs: List[Tuple[int, int]] = []
-    od_demands: List[float] = []
+    od_demands: List[int] = []
     for origin in range(od_tensor.size(0)):
         for destination in range(od_tensor.size(1)):
             if origin == destination:
@@ -189,11 +189,14 @@ def _extract_od_pairs(od_matrix: Tensor | np.ndarray) -> Tuple[List[Tuple[int, i
             demand = float(od_tensor[origin, destination].item())
             if demand <= 0:
                 continue
+            rounded = int(np.rint(demand))
+            if not np.isclose(demand, rounded):
+                raise ValueError("Demand entries must represent whole agents.")
             od_pairs.append((origin, destination))
-            od_demands.append(demand)
+            od_demands.append(rounded)
     if not od_pairs:
-        return [], torch.empty(0, dtype=torch.float32)
-    return od_pairs, torch.tensor(od_demands, dtype=torch.float32)
+        return [], torch.empty(0, dtype=torch.int32)
+    return od_pairs, torch.tensor(od_demands, dtype=torch.int32)
 
 
 def build_path_set(graph: Data, od_matrix: Tensor | np.ndarray, k: int = 3) -> PathSet:
@@ -265,7 +268,7 @@ def all_or_nothing_assignment(
         return empty, empty
 
     if od_demands is None:
-        demands = path_set.od_demands
+        demands = path_set.od_demands.to(dtype=torch.float32)
     else:
         demands = torch.as_tensor(od_demands, dtype=torch.float32)
     if demands.numel() != len(path_set.od_pairs):

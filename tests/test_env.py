@@ -18,7 +18,7 @@ from simulation.env import (
 def build_simple_config() -> EnvConfig:
     embeddings = np.array([[1.0, 2.0]], dtype=np.float32)
     od_matrix = np.array([[0.0, 10.0], [0.0, 0.0]], dtype=np.float32)
-    demands = np.array([10.0], dtype=np.float32)
+    demands = np.array([10], dtype=np.int32)
     path_od_mapping = np.array([0, 0], dtype=np.int64)
     path_edge_incidence = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     freeflow = np.array([1.0, 2.0], dtype=np.float32)
@@ -39,25 +39,38 @@ def env():
     return StaticTapEnv(build_simple_config())
 
 
+def build_feasible_action(environment: StaticTapEnv) -> np.ndarray:
+    action = np.zeros(environment.num_paths, dtype=np.int32)
+    mapping = environment.path_od_mapping.detach().cpu().numpy()
+    od_demands = environment.od_demands.detach().cpu().numpy()
+    for od_idx in range(environment.num_od):
+        indices = np.where(mapping == od_idx)[0]
+        if indices.size == 0:
+            continue
+        action[indices[0]] = int(od_demands[od_idx])
+    return action
+
+
 def test_action_allocation_matches_demand(env):
     env.reset()
-    action = np.array([0.0, 0.0], dtype=np.float32)
+    action = np.array([5, 5], dtype=np.int32)
     _, _, terminated, truncated, info = env.step(action)
 
     assert terminated is True
     assert truncated is False
-    assert np.isclose(np.sum(info["path_flows"]), 10.0)
+    assert info["path_flows"].dtype == np.int32
+    assert np.sum(info["path_flows"]) == 10
     assert np.isclose(info["link_flows"][0], 5.0)
     assert np.isclose(info["link_flows"][1], 5.0)
 
 
 def test_reward_prefers_fast_path(env):
     env.reset()
-    faster_action = np.array([5.0, -5.0], dtype=np.float32)
+    faster_action = np.array([10, 0], dtype=np.int32)
     _, reward_fast, _, _, _ = env.step(faster_action)
 
     env.reset()
-    slower_action = np.array([-5.0, 5.0], dtype=np.float32)
+    slower_action = np.array([0, 10], dtype=np.int32)
     _, reward_slow, _, _, _ = env.step(slower_action)
 
     assert reward_fast > reward_slow
@@ -68,10 +81,22 @@ def test_reward_wrappers_clip_and_normalize(env):
         RewardNormalizationWrapper(env), min_reward=-1.0, max_reward=1.0
     )
     wrapped_env.reset()
-    action = np.array([5.0, -5.0], dtype=np.float32)
+    action = np.array([10, 0], dtype=np.int32)
     _, reward, _, _, _ = wrapped_env.step(action)
 
     assert -1.0 <= reward <= 1.0
+
+
+def test_action_requires_integer_and_complete_flows(env):
+    env.reset()
+    float_action = np.array([5.0, 5.0], dtype=np.float32)
+    with pytest.raises(ValueError):
+        env.step(float_action)
+
+    env.reset()
+    incomplete_action = np.array([6, 3], dtype=np.int32)
+    with pytest.raises(ValueError):
+        env.step(incomplete_action)
 
 
 def test_build_env_from_json_produces_functional_env():
@@ -86,7 +111,7 @@ def test_build_env_from_json_produces_functional_env():
     assert obs.shape == env.observation_space.shape
     assert "od_demands" in info
 
-    action = np.zeros(env.action_space.shape, dtype=np.float32)
+    action = build_feasible_action(env)
     _, reward, terminated, truncated, step_info = env.step(action)
 
     assert terminated is True
@@ -106,7 +131,7 @@ def test_build_env_from_json_produces_functional_env():
     np.testing.assert_allclose(
         env.od_matrix.detach().cpu().numpy(), scenario.od,
     )
-    np.testing.assert_allclose(
+    np.testing.assert_array_equal(
         env.od_demands.detach().cpu().numpy(), path_set.od_demands.cpu().numpy()
     )
     np.testing.assert_allclose(

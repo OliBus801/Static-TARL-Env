@@ -30,7 +30,7 @@ class EnvConfig:
 
         self.embeddings = torch.as_tensor(self.embeddings, dtype=torch.float32)
         self.od_matrix = torch.as_tensor(self.od_matrix, dtype=torch.float32)
-        self.od_demands = torch.as_tensor(self.od_demands, dtype=torch.float32).view(-1)
+        self.od_demands = torch.as_tensor(self.od_demands, dtype=torch.int32).view(-1)
         self.path_od_mapping = torch.as_tensor(
             self.path_od_mapping, dtype=torch.long
         ).view(-1)
@@ -55,7 +55,7 @@ class StaticTapEnv(gym.Env):
 
         self.embeddings = config.embeddings.to(self.device, dtype=torch.float32)
         self.od_matrix = config.od_matrix.to(self.device, dtype=torch.float32)
-        self.od_demands = config.od_demands.to(self.device, dtype=torch.float32)
+        self.od_demands = config.od_demands.to(self.device, dtype=torch.int32)
         self.path_od_mapping = config.path_od_mapping.to(self.device)
         self.path_edge_incidence = config.path_edge_incidence.to(
             self.device, dtype=torch.float32
@@ -86,9 +86,18 @@ class StaticTapEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
 
-        self.action_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(self.num_paths,), dtype=np.float32
+        self.max_flow_per_path = torch.zeros(
+            self.num_paths, dtype=torch.int32, device=self.device
         )
+        for path_idx in range(self.num_paths):
+            od_idx = int(self.path_od_mapping[path_idx].item())
+            demand = int(self.od_demands[od_idx].item())
+            self.max_flow_per_path[path_idx] = demand
+
+        action_bounds = (
+            self.max_flow_per_path.detach().cpu().numpy().astype(np.int64) + 1
+        )
+        self.action_space = spaces.MultiDiscrete(action_bounds)
 
     def _build_observation(self) -> np.ndarray:
         obs = torch.cat(
@@ -102,19 +111,35 @@ class StaticTapEnv(gym.Env):
         info = {"od_demands": self.od_demands.detach().cpu().numpy()}
         return obs, info
 
-    def _logits_to_path_flows(self, action: np.ndarray | Tensor) -> Tensor:
-        logits = torch.as_tensor(action, dtype=torch.float32, device=self.device).view(-1)
-        if logits.numel() != self.num_paths:
+    def _validate_path_flows(self, action: np.ndarray | Tensor) -> Tensor:
+        if isinstance(action, Tensor):
+            action_array = action.detach().cpu().numpy()
+        else:
+            action_array = np.asarray(action)
+        if action_array.dtype.kind not in {"i", "u"}:
+            raise ValueError("Action must contain integer flow values.")
+
+        flows = torch.as_tensor(action, dtype=torch.int32, device=self.device).view(-1)
+        if flows.numel() != self.num_paths:
             raise ValueError("Action size does not match the number of available paths.")
 
-        flows = torch.zeros_like(logits)
+        if torch.any(flows < 0):
+            raise ValueError("Action cannot allocate negative flows.")
+
+        if torch.any(flows > self.max_flow_per_path):
+            raise ValueError("Action exceeds the available demand for at least one path.")
+
         for od_idx in range(self.num_od):
             mask = self.path_od_mapping == od_idx
             if not torch.any(mask):
                 continue
-            od_logits = logits[mask]
-            probs = torch.softmax(od_logits, dim=0)
-            flows[mask] = probs * self.od_demands[od_idx]
+            allocated = int(torch.sum(flows[mask]).item())
+            demand = int(self.od_demands[od_idx].item())
+            if allocated != demand:
+                raise ValueError(
+                    f"Action must allocate exactly {demand} agents for OD index {od_idx}."
+                )
+
         return flows
 
     def _compute_link_costs(self, link_flows: Tensor) -> tuple[Tensor, Tensor]:
@@ -131,13 +156,14 @@ class StaticTapEnv(gym.Env):
         if not self.action_space.contains(action):
             raise ValueError("Action is outside of the defined action space.")
 
-        path_flows = self._logits_to_path_flows(action)
+        path_flows_int = self._validate_path_flows(action)
+        path_flows = path_flows_int.to(dtype=torch.float32)
         link_flows = torch.matmul(self.path_edge_incidence.T, path_flows)
         travel_times, system_cost = self._compute_link_costs(link_flows)
 
         reward = float(-system_cost.item())
         info = {
-            "path_flows": path_flows.detach().cpu().numpy(),
+            "path_flows": path_flows_int.detach().cpu().numpy().astype(np.int32),
             "link_flows": link_flows.detach().cpu().numpy(),
             "travel_times": travel_times.detach().cpu().numpy(),
         }

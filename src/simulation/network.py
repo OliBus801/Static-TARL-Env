@@ -152,7 +152,18 @@ class TapScenario:
 
         with open(filepath, "r", encoding="utf-8") as file:
             demand_data = json.load(file)
-        self.od = np.array(demand_data["matrix"], dtype=float)
+
+        raw_matrix = np.array(demand_data["matrix"], dtype=float)
+        if np.any(raw_matrix < 0):
+            raise ValueError("Demand matrix must contain non-negative values.")
+
+        rounded = np.rint(raw_matrix)
+        if not np.allclose(raw_matrix, rounded):
+            raise ValueError(
+                "Demand matrix must contain integer-compatible demand counts."
+            )
+
+        self.od = rounded.astype(np.int32)
         self.total_agents = int(np.sum(self.od))
         print(
             "✅ Successfully loaded demand from JSON file!",
@@ -163,6 +174,12 @@ class TapScenario:
     def check_flow_consistency(self, assignment: np.ndarray) -> bool:
         """Verify whether the assignment complies with flow conservation."""
 
+        assignment_array = np.asarray(assignment)
+        if assignment_array.dtype.kind not in {"i", "u"}:
+            raise TypeError("Flow assignments must contain integer values.")
+
+        assignment_int = assignment_array.astype(np.int64, copy=False)
+
         # supply = outflow demand - inflow demand per node
         supply = np.sum(self.od, axis=1) - np.sum(self.od, axis=0)
 
@@ -172,8 +189,8 @@ class TapScenario:
         n_nodes = int(self.graph.num_nodes)
 
         # vectorised aggregation of flows per node
-        outflows = np.bincount(origins, weights=assignment, minlength=n_nodes)
-        inflows = np.bincount(destinations, weights=assignment, minlength=n_nodes)
+        outflows = np.bincount(origins, weights=assignment_int, minlength=n_nodes)
+        inflows = np.bincount(destinations, weights=assignment_int, minlength=n_nodes)
 
         flows = supply - outflows + inflows
 
@@ -192,30 +209,31 @@ class TapScenario:
     def calculate_system_cost(self, assignment: np.ndarray) -> float:
         """Compute the total system travel time using the BPR cost function."""
 
-        # Check if assignment is of correct type
-        if not isinstance(assignment, np.ndarray) or assignment.dtype != float:
-            raise TypeError("Assignment must be a numpy ndarray of type float and size matching the number of edges in the graph.")
-
         if self.graph is None:
             raise ValueError("Network must be loaded before calculating costs.")
 
-        if assignment.size != self.graph.num_edges:
+        assignment_array = np.asarray(assignment)
+        if assignment_array.dtype.kind not in {"i", "u"}:
+            raise TypeError("Assignment must be an array of integer flows.")
+
+        if assignment_array.size != self.graph.num_edges:
             raise ValueError(
                 "Assignment size must match the number of edges in the graph."
             )
 
-        if not self.check_flow_consistency(assignment):
+        if not self.check_flow_consistency(assignment_array):
             raise ValueError("The provided assignment does not verify flow consistency.")
 
+        flows = assignment_array.astype(float, copy=False)
         capacities = self.graph.capacity.cpu().numpy()
         freeflows = self.graph.freeflow_travel_time.cpu().numpy()
 
-        ratio = np.zeros_like(assignment, dtype=float)
+        ratio = np.zeros_like(flows, dtype=float)
         nonzero_mask = capacities > 0
-        ratio[nonzero_mask] = assignment[nonzero_mask] / capacities[nonzero_mask]
+        ratio[nonzero_mask] = flows[nonzero_mask] / capacities[nonzero_mask]
 
         travel_times = freeflows * (1 + ALPHA * ratio**BETA)
-        total_cost = float(np.sum(travel_times * assignment))
+        total_cost = float(np.sum(travel_times * flows))
 
         print(f"Coût total du système : {total_cost}")
         return float(total_cost)

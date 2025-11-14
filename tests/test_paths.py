@@ -60,7 +60,8 @@ def test_all_or_nothing_assignment_matches_demands():
 
     for od_idx, demand in enumerate(path_set.od_demands):
         mask = path_set.path_od_mapping == od_idx
-        assert torch.isclose(flows[mask].sum(), demand)
+        expected = demand.to(dtype=torch.float32)
+        assert torch.isclose(flows[mask].sum(), expected)
 
     # For OD (0->2) the shortest path is the direct edge with cost 1.2.
     mask_long = path_set.path_od_mapping == 1

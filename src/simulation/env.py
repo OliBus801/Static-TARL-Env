@@ -15,15 +15,32 @@ from torch import Tensor
 class EnvConfig:
     """Utility container with the tensors required to build the environment."""
 
-    embeddings: Tensor
-    od_matrix: Tensor
-    od_demands: Tensor
-    path_od_mapping: torch.LongTensor
-    path_edge_incidence: Tensor
-    freeflow_times: Tensor
-    capacities: Tensor
+    embeddings: Tensor | np.ndarray
+    od_matrix: Tensor | np.ndarray
+    od_demands: Tensor | np.ndarray
+    path_od_mapping: Tensor | np.ndarray
+    path_edge_incidence: Tensor | np.ndarray
+    freeflow_times: Tensor | np.ndarray
+    capacities: Tensor | np.ndarray
     alpha: float = 0.15
     beta: float = 4.0
+
+    def __post_init__(self) -> None:
+        """Convert inputs to tensors to ease interoperability with numpy."""
+
+        self.embeddings = torch.as_tensor(self.embeddings, dtype=torch.float32)
+        self.od_matrix = torch.as_tensor(self.od_matrix, dtype=torch.float32)
+        self.od_demands = torch.as_tensor(self.od_demands, dtype=torch.float32).view(-1)
+        self.path_od_mapping = torch.as_tensor(
+            self.path_od_mapping, dtype=torch.long
+        ).view(-1)
+        self.path_edge_incidence = torch.as_tensor(
+            self.path_edge_incidence, dtype=torch.float32
+        )
+        self.freeflow_times = torch.as_tensor(
+            self.freeflow_times, dtype=torch.float32
+        ).view(-1)
+        self.capacities = torch.as_tensor(self.capacities, dtype=torch.float32).view(-1)
 
 
 class StaticTapEnv(gym.Env):

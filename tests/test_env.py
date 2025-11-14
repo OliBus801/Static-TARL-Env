@@ -60,8 +60,9 @@ def test_action_allocation_matches_demand(env):
     assert truncated is False
     assert info["path_flows"].dtype == np.int32
     assert np.sum(info["path_flows"]) == 10
-    assert np.isclose(info["link_flows"][0], 5.0)
-    assert np.isclose(info["link_flows"][1], 5.0)
+    assert info["link_flows"].dtype == np.int32
+    assert info["link_flows"][0] == 5
+    assert info["link_flows"][1] == 5
 
 
 def test_reward_prefers_fast_path(env):
@@ -97,6 +98,22 @@ def test_action_requires_integer_and_complete_flows(env):
     incomplete_action = np.array([6, 3], dtype=np.int32)
     with pytest.raises(ValueError):
         env.step(incomplete_action)
+
+
+def test_action_space_sampling_respects_flow_consistency(env):
+    env.reset()
+    od_demands = env.od_demands.detach().cpu().numpy()
+    mapping = env.path_od_mapping.detach().cpu().numpy()
+    invalid = np.array([5.0, 5.0], dtype=np.float32)
+    assert not env.action_space.contains(invalid)
+    for _ in range(25):
+        action = env.action_space.sample()
+        assert env.action_space.contains(action)
+        for od_idx in range(env.num_od):
+            indices = np.where(mapping == od_idx)[0]
+            if indices.size == 0:
+                continue
+            assert np.sum(action[indices]) == od_demands[od_idx]
 
 
 def test_build_env_from_json_produces_functional_env():

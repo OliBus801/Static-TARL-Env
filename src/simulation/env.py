@@ -43,6 +43,55 @@ class EnvConfig:
         self.capacities = torch.as_tensor(self.capacities, dtype=torch.float32).view(-1)
 
 
+class FlowConsistentMultiDiscrete(spaces.MultiDiscrete):
+    """MultiDiscrete space that enforces OD demand consistency."""
+
+    def __init__(
+        self,
+        nvec: np.ndarray,
+        path_od_mapping: np.ndarray,
+        od_demands: np.ndarray,
+    ) -> None:
+        super().__init__(nvec)
+        self.path_od_mapping = np.asarray(path_od_mapping, dtype=np.int64).reshape(-1)
+        self.od_demands = np.asarray(od_demands, dtype=np.int64).reshape(-1)
+        if self.path_od_mapping.shape[0] != self.nvec.shape[0]:
+            raise ValueError(
+                "path_od_mapping must have the same size as the number of paths"
+            )
+        self.od_to_paths: list[np.ndarray] = []
+        for od_idx in range(self.od_demands.size):
+            indices = np.where(self.path_od_mapping == od_idx)[0]
+            self.od_to_paths.append(indices)
+
+    def sample(self) -> np.ndarray:
+        sample = np.zeros_like(self.nvec, dtype=np.int64)
+        for od_idx, path_indices in enumerate(self.od_to_paths):
+            if path_indices.size == 0:
+                continue
+            demand = int(self.od_demands[od_idx])
+            if demand == 0:
+                continue
+            probs = np.ones(path_indices.size, dtype=np.float64) / float(path_indices.size)
+            allocation = self.np_random.multinomial(demand, probs)
+            sample[path_indices] = allocation
+        return sample
+
+    def contains(self, x: Any) -> bool:
+        arr = np.asarray(x)
+        if arr.dtype.kind not in {"i", "u"}:
+            return False
+        if not super().contains(arr):
+            return False
+        arr = arr.astype(np.int64, copy=False).reshape(-1)
+        for od_idx, path_indices in enumerate(self.od_to_paths):
+            if path_indices.size == 0:
+                continue
+            if int(np.sum(arr[path_indices])) != int(self.od_demands[od_idx]):
+                return False
+        return True
+
+
 class StaticTapEnv(gym.Env):
     """Static TAP environment where an action is a set of path logits."""
 
@@ -60,6 +109,7 @@ class StaticTapEnv(gym.Env):
         self.path_edge_incidence = config.path_edge_incidence.to(
             self.device, dtype=torch.float32
         )
+        self.path_edge_incidence_int = self.path_edge_incidence.to(dtype=torch.int32)
         self.freeflow_times = config.freeflow_times.to(self.device, dtype=torch.float32)
         self.capacities = config.capacities.to(self.device, dtype=torch.float32)
         self.alpha = config.alpha
@@ -97,7 +147,11 @@ class StaticTapEnv(gym.Env):
         action_bounds = (
             self.max_flow_per_path.detach().cpu().numpy().astype(np.int64) + 1
         )
-        self.action_space = spaces.MultiDiscrete(action_bounds)
+        path_od_mapping_np = self.path_od_mapping.detach().cpu().numpy().astype(np.int64)
+        od_demands_np = self.od_demands.detach().cpu().numpy().astype(np.int64)
+        self.action_space = FlowConsistentMultiDiscrete(
+            action_bounds, path_od_mapping_np, od_demands_np
+        )
 
     def _build_observation(self) -> np.ndarray:
         obs = torch.cat(
@@ -158,13 +212,14 @@ class StaticTapEnv(gym.Env):
 
         path_flows_int = self._validate_path_flows(action)
         path_flows = path_flows_int.to(dtype=torch.float32)
-        link_flows = torch.matmul(self.path_edge_incidence.T, path_flows)
+        link_flows_int = torch.matmul(self.path_edge_incidence_int.T, path_flows_int)
+        link_flows = link_flows_int.to(dtype=torch.float32)
         travel_times, system_cost = self._compute_link_costs(link_flows)
 
         reward = float(-system_cost.item())
         info = {
             "path_flows": path_flows_int.detach().cpu().numpy().astype(np.int32),
-            "link_flows": link_flows.detach().cpu().numpy(),
+            "link_flows": link_flows_int.detach().cpu().numpy().astype(np.int32),
             "travel_times": travel_times.detach().cpu().numpy(),
         }
         obs = self._build_observation()

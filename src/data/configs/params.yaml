@@ -6,6 +6,15 @@ seeds:
   - 3
   - 4
 
+training:
+  num_episodes: 10     # Number of RL episodes to run
+  rolling_window: 5    # Size of the moving average used for logging
+  action_library_size: 16  # Number of candidate actions sampled for tabular RL
+  scenario:
+    network_path: src/data/scenarios/test/test_network.json
+    demand_path: src/data/scenarios/test/test_demand.json
+    k_paths: 3
+
 # === Model parameters ===
 alpha: 0.15        # Learning rate or step size
 beta: 4.0       # Momentum or weighting coefficient

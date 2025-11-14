@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from torch import Tensor
 from torch_geometric.data import Data
+from torch_geometric.utils import to_dense_adj
 
 
 @dataclass
@@ -35,14 +36,10 @@ class _Path:
     edges: List[int]
 
 
-def _edge_lengths_from_graph(graph: Data) -> Tensor:
-    if hasattr(graph, "length") and graph.length is not None:
-        return torch.as_tensor(graph.length, dtype=torch.float64).flatten()
-    if hasattr(graph, "edge_attr") and graph.edge_attr is not None:
-        # Assume the last column contains lengths if the attribute exists.
-        attr = torch.as_tensor(graph.edge_attr, dtype=torch.float64)
-        if attr.ndim == 2:
-            return attr[:, -1].flatten()
+def _edge_costs_from_graph(graph: Data) -> Tensor:
+    if hasattr(graph, "freeflow_travel_time") and graph.freeflow_travel_time is not None:
+        return torch.as_tensor(graph.freeflow_travel_time, dtype=torch.float64).flatten()
+    # Fallback: use unit costs if no travel time attribute is found.
     num_edges = int(graph.edge_index.size(1))
     return torch.ones(num_edges, dtype=torch.float64)
 
@@ -61,7 +58,7 @@ def _build_adjacency(graph: Data) -> List[List[Tuple[int, int]]]:
 
 def _shortest_path(
     adjacency: Sequence[Sequence[Tuple[int, int]]],
-    edge_lengths: Sequence[float],
+    edge_costs: Sequence[float],
     source: int,
     target: int,
     forbidden_edges: Iterable[int] | None = None,
@@ -91,7 +88,7 @@ def _shortest_path(
                 continue
             if neighbor != target and neighbor in forbidden_nodes:
                 continue
-            new_cost = cost + float(edge_lengths[edge_idx])
+            new_cost = cost + float(edge_costs[edge_idx])
             if new_cost < distances[neighbor]:
                 distances[neighbor] = new_cost
                 predecessors[neighbor] = node
@@ -118,14 +115,14 @@ def _shortest_path(
 
 def _yen_k_shortest_paths(
     adjacency: Sequence[Sequence[Tuple[int, int]]],
-    edge_lengths: Sequence[float],
+    edge_costs: Sequence[float],
     source: int,
     target: int,
     k: int,
 ) -> List[_Path]:
     if k <= 0:
         return []
-    first_path = _shortest_path(adjacency, edge_lengths, source, target)
+    first_path = _shortest_path(adjacency, edge_costs, source, target)
     if first_path is None:
         return []
 
@@ -148,7 +145,7 @@ def _yen_k_shortest_paths(
             forbidden_nodes = set(root_nodes[:-1])
             spur_path = _shortest_path(
                 adjacency,
-                edge_lengths,
+                edge_costs,
                 spur_node,
                 target,
                 forbidden_edges=removed_edges,
@@ -159,7 +156,7 @@ def _yen_k_shortest_paths(
 
             total_nodes = root_nodes[:-1] + spur_path.nodes
             total_edges = root_edges + spur_path.edges
-            root_cost = sum(float(edge_lengths[idx]) for idx in root_edges)
+            root_cost = sum(float(edge_costs[idx]) for idx in root_edges)
             total_cost = root_cost + spur_path.cost
             candidate = _Path(cost=total_cost, nodes=total_nodes, edges=total_edges)
             candidate_signature = tuple(candidate.edges)
@@ -208,7 +205,7 @@ def build_path_set(graph: Data, od_matrix: Tensor | np.ndarray, k: int = 3) -> P
         raise ValueError("Graph must define num_nodes to compute paths.")
 
     adjacency = _build_adjacency(graph)
-    edge_lengths = _edge_lengths_from_graph(graph)
+    edge_costs = _edge_costs_from_graph(graph)
     od_pairs, od_demands = _extract_od_pairs(od_matrix)
 
     num_edges = int(graph.edge_index.size(1))
@@ -228,7 +225,7 @@ def build_path_set(graph: Data, od_matrix: Tensor | np.ndarray, k: int = 3) -> P
     path_nodes: List[List[int]] = []
 
     for od_idx, (origin, destination) in enumerate(od_pairs):
-        k_paths = _yen_k_shortest_paths(adjacency, edge_lengths, origin, destination, k)
+        k_paths = _yen_k_shortest_paths(adjacency, edge_costs, origin, destination, k)
         for path in k_paths:
             incidence_row = torch.zeros(num_edges, dtype=torch.float32)
             for edge_idx in path.edges:

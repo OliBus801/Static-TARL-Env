@@ -10,6 +10,11 @@ import numpy as np
 import torch
 from torch import Tensor
 
+try:  # pragma: no cover - optional dependency for rendering only
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:  # pragma: no cover - fallback if matplotlib is missing
+    plt = None
+
 
 @dataclass
 class EnvConfig:
@@ -24,6 +29,9 @@ class EnvConfig:
     capacities: Tensor | np.ndarray
     alpha: float = 0.15
     beta: float = 4.0
+    node_positions: Tensor | np.ndarray | None = None
+    edge_index: Tensor | np.ndarray | None = None
+    paths: list[list[int]] | None = None
 
     def __post_init__(self) -> None:
         """Convert inputs to tensors to ease interoperability with numpy."""
@@ -41,6 +49,12 @@ class EnvConfig:
             self.freeflow_times, dtype=torch.float32
         ).view(-1)
         self.capacities = torch.as_tensor(self.capacities, dtype=torch.float32).view(-1)
+        if self.node_positions is not None:
+            self.node_positions = torch.as_tensor(
+                self.node_positions, dtype=torch.float32
+            )
+        if self.edge_index is not None:
+            self.edge_index = torch.as_tensor(self.edge_index, dtype=torch.long)
 
 
 class FlowConsistentMultiDiscrete(spaces.MultiDiscrete):
@@ -95,7 +109,7 @@ class FlowConsistentMultiDiscrete(spaces.MultiDiscrete):
 class StaticTapEnv(gym.Env):
     """Static TAP environment where an action is a set of path logits."""
 
-    metadata = {"render_modes": []}
+    metadata = {"render_modes": ["human", "rgb_array"]}
 
     def __init__(self, config: EnvConfig, device: torch.device | None = None) -> None:
         super().__init__()
@@ -114,6 +128,23 @@ class StaticTapEnv(gym.Env):
         self.capacities = config.capacities.to(self.device, dtype=torch.float32)
         self.alpha = config.alpha
         self.beta = config.beta
+        self.node_positions = (
+            config.node_positions.to(self.device, dtype=torch.float32)
+            if config.node_positions is not None
+            else None
+        )
+        self.edge_index = (
+            config.edge_index.to(self.device, dtype=torch.long)
+            if config.edge_index is not None
+            else None
+        )
+        self.paths = config.paths or []
+        self._figure = None
+        self._axis = None
+        self._last_action: np.ndarray | None = None
+        self._last_reward: float | None = None
+        self._last_path_flows: np.ndarray | None = None
+        self._last_link_flows: np.ndarray | None = None
 
         if self.od_demands.ndim != 1:
             raise ValueError("od_demands must be a 1-D tensor with per-OD demand values.")
@@ -161,6 +192,10 @@ class StaticTapEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
         super().reset(seed=seed)
+        self._last_action = None
+        self._last_reward = None
+        self._last_path_flows = None
+        self._last_link_flows = None
         obs = self._build_observation()
         info = {"od_demands": self.od_demands.detach().cpu().numpy()}
         return obs, info
@@ -222,10 +257,116 @@ class StaticTapEnv(gym.Env):
             "link_flows": link_flows_int.detach().cpu().numpy().astype(np.int32),
             "travel_times": travel_times.detach().cpu().numpy(),
         }
+        self._last_action = path_flows_int.detach().cpu().numpy()
+        self._last_reward = reward
+        self._last_path_flows = info["path_flows"]
+        self._last_link_flows = info["link_flows"]
         obs = self._build_observation()
         terminated = True
         truncated = False
         return obs, reward, terminated, truncated, info
+
+    def render(self, mode: str = "human"):
+        if mode not in self.metadata["render_modes"]:
+            raise ValueError(f"Unsupported render mode '{mode}'.")
+        if plt is None:
+            raise RuntimeError("Matplotlib is required for rendering but is not installed.")
+        if self.node_positions is None or self.edge_index is None:
+            raise RuntimeError("Rendering requires node positions and edge index data.")
+
+        node_positions = self.node_positions.detach().cpu().numpy()
+        edge_index = self.edge_index.detach().cpu().numpy()
+        num_edges = edge_index.shape[1]
+        if self._last_link_flows is None or self._last_link_flows.size != num_edges:
+            link_flows = np.zeros(num_edges, dtype=np.float32)
+        else:
+            link_flows = self._last_link_flows.astype(np.float32, copy=False)
+
+        if self._figure is None or self._axis is None:
+            self._figure, self._axis = plt.subplots(figsize=(8, 6))
+
+        ax = self._axis
+        ax.clear()
+
+        max_flow = float(np.max(link_flows)) if link_flows.size > 0 else 0.0
+        if max_flow <= 0:
+            normalized = np.zeros_like(link_flows)
+        else:
+            normalized = link_flows / max_flow
+        cmap = plt.cm.viridis(normalized)
+        base_width = 1.5
+        widths = base_width + 4.0 * normalized
+
+        for idx in range(num_edges):
+            origin = edge_index[0, idx]
+            destination = edge_index[1, idx]
+            start = node_positions[origin]
+            end = node_positions[destination]
+            ax.plot(
+                [start[0], end[0]],
+                [start[1], end[1]],
+                color=cmap[idx],
+                linewidth=widths[idx],
+                alpha=0.9,
+                zorder=1,
+            )
+
+        if node_positions.size:
+            ax.scatter(
+                node_positions[:, 0],
+                node_positions[:, 1],
+                color="black",
+                s=25,
+                zorder=5,
+            )
+
+        if self.paths and self._last_path_flows is not None:
+            path_flows = self._last_path_flows
+            max_path_flow = float(np.max(path_flows)) if path_flows.size > 0 else 0.0
+            for flow, nodes in zip(path_flows, self.paths):
+                if flow <= 0:
+                    continue
+                coords = node_positions[np.asarray(nodes, dtype=np.int64)]
+                scale = flow / max_path_flow if max_path_flow > 0 else 0.0
+                ax.plot(
+                    coords[:, 0],
+                    coords[:, 1],
+                    color="red",
+                    linewidth=2.0 + 3.0 * scale,
+                    alpha=0.8,
+                    zorder=10,
+                )
+
+        ax.set_title(
+            "Traffic assignment flows"
+            if self._last_reward is None
+            else f"Reward: {self._last_reward:.2f}"
+        )
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, linestyle="--", alpha=0.3)
+        self._figure.tight_layout()
+
+        if mode == "human":
+            self._figure.canvas.draw_idle()
+            plt.show(block=False)
+            return None
+
+        self._figure.canvas.draw()
+        width, height = self._figure.canvas.get_width_height()
+        image = np.frombuffer(self._figure.canvas.tostring_rgb(), dtype=np.uint8)
+        return image.reshape((height, width, 3))
+
+    def close(self):
+        if plt is not None and self._figure is not None:
+            plt.close(self._figure)
+        self._figure = None
+        self._axis = None
+        self._last_action = None
+        self._last_reward = None
+        self._last_path_flows = None
+        self._last_link_flows = None
 
 
 class RewardNormalizationWrapper(gym.RewardWrapper):

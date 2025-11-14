@@ -67,6 +67,9 @@ def build_env_from_json(
         capacities=torch.as_tensor(capacities, dtype=torch.float32).flatten(),
         alpha=ALPHA,
         beta=BETA,
+        node_positions=graph.x,
+        edge_index=graph.edge_index,
+        paths=path_set.paths,
     )
 
     env = StaticTapEnv(config, device=device)
